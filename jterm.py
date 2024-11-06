@@ -54,6 +54,22 @@ class Interface:
     def set_timeout(self, timeout_s):
         raise NotImplementedError()
 
+    def open(self):
+        raise NotImplementedError()
+
+    def try_open(self, first_try=True):
+        while True:
+            try:
+                self.open()
+                break
+            except serial.SerialException as e:
+                if first_try:
+                    print(
+                        f"Failed to open {self}: {e}. Will retry until stopped with ctrl+c."
+                    )
+                    first_try = False
+                time.sleep(0.1)
+
 
 class SerialInterface(Interface):
     def __init__(self, port, baudrate):
@@ -71,6 +87,10 @@ class SerialInterface(Interface):
 
     def open(self):
         self.dev = serial.Serial(port=self._port, baudrate=self._baudrate, timeout=0)
+
+    def close(self):
+        self.dev.close()
+        self.dev = None
 
     def set_timeout(self, timeout_s):
         self.dev.timeout = timeout_s
@@ -127,11 +147,11 @@ def hints(s):
 
 def process_cmd(cmdline, interface, log_file, args):
     eol = "\n"
-    if args.eof == "cr":
+    if args.eol == "cr":
         eol = b"\r"
-    elif args.eof == "crlf":
+    elif args.eol == "crlf":
         eol = b"\r\n"
-    elif args.eof == "lf":
+    elif args.eol == "lf":
         pass
     else:
         raise ValueError(f"Bad argument for --eof '{args.eof}'")
@@ -225,13 +245,16 @@ def process_input(ln, line_state, interface, log_file, prompt, args):
 
 
 def process_interface(line_state, line_buf, interface, log_file):
-    while data := interface.read(1024):
-        line_buf.write(data)
+    data = interface.read(1024)
+    if not data:
+        return False
+    line_buf.write(data)
     if line_buf.has_line():
         line_state.hide()
         while (line := line_buf.readline()) is not None:
             print_line(line, log_file)
         line_state.show()
+    return True
 
 
 def send_file(interface, filename):
@@ -276,7 +299,14 @@ def interactive(interface, log_file, args):
                 )
             if interface.fileno() in rd:
                 # Data is available at our interface (or EOF).
-                process_interface(line_state, line_buf, interface, log_file)
+                got_data = process_interface(line_state, line_buf, interface, log_file)
+                if not got_data:
+                    print(
+                        f"Interface {interface} closed. Will retry to open it. Press ctrl+c to stop."
+                    )
+                    interface.close()
+                    interface.try_open()
+
     except EOFError:
         ln.edit_stop(line_state)
         os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
@@ -324,7 +354,7 @@ def parse_args():
         help="Delay between command and end of line sequence (ms)",
     )
     parser.add_argument(
-        "delay_between_byte_ms",
+        "--delay_between_byte_ms",
         type=int,
         default=0,
         help="Delay between each byte sent (ms)",
@@ -344,7 +374,7 @@ def parse_args():
     )
     parser.add_argument(
         "--eol",
-        default="lf",
+        default="crlf",
         help="End of line character(s), options: lf (default), crlf, cr",
     )
     return parser.parse_args()
@@ -373,22 +403,11 @@ def main():
         print("Please specify either --socket or --serial.")
         sys.exit(1)
 
-    if args.eof != "crlf" and args.eof != "cr" and args.eof != "lf":
-        print("Please choose --eof to be crlf, cr or lf")
+    if args.eol != "crlf" and args.eol != "cr" and args.eol != "lf":
+        print("Please choose --eol to be 'crlf', 'cr' or 'lf'")
         sys.exit(1)
 
-    first_try = True
-    while True:
-        try:
-            interface.open()
-            break
-        except serial.SerialException as e:
-            if first_try:
-                print(
-                    f"Failed to open {interface}: {e}. Will retry until stopped with ctrl+c."
-                )
-                first_try = False
-            time.sleep(0.1)
+    interface.try_open(True)
 
     if args.sendfile:
         send_file(interface, args.sendfile)
