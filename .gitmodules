@@ -1,0 +1,3 @@
+[submodule "py_linenoise"]
+	path = py_linenoise
+	url = https://github.com/jakeru/py_linenoise.git
