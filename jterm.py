@@ -54,30 +54,27 @@ class Interface:
     def set_timeout(self, timeout_s):
         raise NotImplementedError()
 
+    def try_open(self):
+        raise NotImplementedError()
+
     def open(self):
         raise NotImplementedError()
 
-    def try_open(self, first_try=True):
-        while True:
-            try:
-                self.open()
-                break
-            except serial.SerialException as e:
-                if first_try:
-                    print(
-                        f"Failed to open {self}: {e}. Will retry until stopped with ctrl+c."
-                    )
-                    first_try = False
-                time.sleep(0.1)
+    def close(self):
+        raise NotImplementedError()
 
 
 class SerialInterface(Interface):
     def __init__(self, port, baudrate):
         self._port = port
         self._baudrate = baudrate
+        self._timeout_s = 0
 
     def read(self, size):
-        return self.dev.read(size)
+        try:
+            return self.dev.read(size)
+        except serial.SerialException:
+            return b""
 
     def write(self, data):
         self.dev.write(data)
@@ -86,23 +83,43 @@ class SerialInterface(Interface):
         return self.dev.fileno()
 
     def open(self):
-        self.dev = serial.Serial(port=self._port, baudrate=self._baudrate, timeout=0)
+        self.dev = serial.Serial(
+            port=self._port, baudrate=self._baudrate, timeout=self._timeout_s
+        )
 
     def close(self):
         self.dev.close()
         self.dev = None
 
     def set_timeout(self, timeout_s):
-        self.dev.timeout = timeout_s
+        self._timeout_s = timeout_s
+        if self.dev is not None:
+            self.dev.timeout = timeout_s
+
+    def try_open(self):
+        first_try = True
+        while True:
+            try:
+                self.open()
+                print(f"Connected to serial port `{self}` at {self._baudrate} bps")
+                break
+            except serial.SerialException as e:
+                if first_try:
+                    print(
+                        f"Failed to open {self}: {e}. Will retry until stopped with ctrl+c."
+                    )
+            first_try = False
+            time.sleep(0.1)
 
     def __str__(self):
         return f"{self._port}"
 
 
 class SocketInterface(Interface):
-    def __init__(self, host, port):
+    def __init__(self, host, port, timeout_s):
         self._host = host
         self._port = port
+        self._timeout_s = timeout_s
 
     def read(self, size):
         try:
@@ -120,11 +137,32 @@ class SocketInterface(Interface):
 
     def open(self):
         self.dev = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.dev.settimeout(self._timeout_s)
         self.dev.connect((self._host, self._port))
-        self.dev.settimeout(0)
+
+    def close(self):
+        self.dev.close()
+        self.dev = None
 
     def set_timeout(self, timeout_s):
-        self.dev.settimeout(timeout_s)
+        self.timeout_s = timeout_s
+        if self.dev is not None:
+            self.dev.settimeout(timeout_s)
+
+    def try_open(self):
+        first_try = True
+        while True:
+            try:
+                self.open()
+                print(f"Connected to `{self}`")
+                break
+            except (ConnectionRefusedError, TimeoutError) as e:
+                if first_try:
+                    print(
+                        f"Failed to open {self}: {e}. Will retry until stopped with ctrl+c."
+                    )
+            first_try = False
+            time.sleep(1)
 
     def __str__(self):
         return f"{self._host}:{self._port}"
@@ -145,28 +183,31 @@ def hints(s):
     return None
 
 
-def process_cmd(cmdline, interface, log_file, args):
-    eol = "\n"
-    if args.eol == "cr":
-        eol = b"\r"
-    elif args.eol == "crlf":
-        eol = b"\r\n"
-    elif args.eol == "lf":
-        pass
-    else:
-        raise ValueError(f"Bad argument for --eof '{args.eof}'")
+def eol_option_as_bytestring(eol_option):
+    eol_alternatives = {
+        "lf": "\n",
+        "crlf": "\r\n",
+        "cr": "\r",
+    }
+    return eol_alternatives[eol_option]
 
+
+def process_cmd(cmdline, interface, log_file, args):
     if log_file is not None:
         log_file.write(cmdline + "\n")
 
     if args.delay_between_byte_ms > 0:
-        for c in cmdline.encode:
-            interface.write(c)
+        for b in cmdline.encode():
+            interface.write(bytes([b]))
             time.sleep(args.delay_between_byte_ms / 1000)
     else:
         interface.write(cmdline.encode())
     time.sleep(args.delay_before_eol_ms / 1000)
-    interface.write(eol)
+    eol = eol_option_as_bytestring(args.eol)
+    for b in eol.encode():
+        interface.write(bytes([b]))
+        time.sleep(args.delay_between_byte_ms / 1000)
+    time.sleep(args.delay_after_eol_ms / 1000)
 
 
 def remove_ansi_escape_codes(s):
@@ -301,12 +342,11 @@ def interactive(interface, log_file, args):
                 # Data is available at our interface (or EOF).
                 got_data = process_interface(line_state, line_buf, interface, log_file)
                 if not got_data:
-                    print(
-                        f"Interface {interface} closed. Will retry to open it. Press ctrl+c to stop."
-                    )
+                    line_state.hide()
+                    print(f"Interface {interface} closed. Will retry to open it.")
                     interface.close()
                     interface.try_open()
-
+                    line_state.show()
     except EOFError:
         ln.edit_stop(line_state)
         os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
@@ -328,7 +368,8 @@ def parse_args():
     )
     parser.add_argument(
         "--serial",
-        help="The serial device to connect to",
+        metavar="DEVICE",
+        help="The serial device to connect to, for example `/dev/ttyUSB0`",
     )
     parser.add_argument(
         "--socket",
@@ -348,16 +389,22 @@ def parse_args():
         help="Timeout in seconds",
     )
     parser.add_argument(
-        "--delay_before_eol_ms",
-        type=int,
-        default=100,
-        help="Delay between command and end of line sequence (ms)",
-    )
-    parser.add_argument(
         "--delay_between_byte_ms",
         type=int,
         default=0,
         help="Delay between each byte sent (ms)",
+    )
+    parser.add_argument(
+        "--delay_before_eol_ms",
+        type=int,
+        default=0,
+        help="Delay between command and end of line sequence (ms)",
+    )
+    parser.add_argument(
+        "--delay_after_eol_ms",
+        type=int,
+        default=100,
+        help="Delay after end of last end of line byte (ms)",
     )
     default_log_file_name = (
         datetime.datetime.now().isoformat(sep="_", timespec="seconds").replace(":", "")
@@ -375,7 +422,8 @@ def parse_args():
     parser.add_argument(
         "--eol",
         default="crlf",
-        help="End of line character(s), options: lf (default), crlf, cr",
+        choices=("crlf", "cr", "lf"),
+        help="End of line character(s)",
     )
     return parser.parse_args()
 
@@ -396,18 +444,14 @@ def main():
                 )
             )
             sys.exit(1)
-        interface = SocketInterface(host, port)
+        interface = SocketInterface(host, port, args.timeout)
     elif args.serial:
         interface = SerialInterface(args.serial, args.baudrate)
     else:
         print("Please specify either --socket or --serial.")
         sys.exit(1)
 
-    if args.eol != "crlf" and args.eol != "cr" and args.eol != "lf":
-        print("Please choose --eol to be 'crlf', 'cr' or 'lf'")
-        sys.exit(1)
-
-    interface.try_open(True)
+    interface.try_open()
 
     if args.sendfile:
         send_file(interface, args.sendfile)
