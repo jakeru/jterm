@@ -7,6 +7,9 @@ By using (a slightly modified version of)
 [py_linenoise](https://github.com/deadsy/py_linenoise) this tool allows the user
 to type commands and receive data at the same time.
 
+It has been used by me (Jakob Ruhe) for quite some time but in April 2025
+published version 1.0.0 of this tool.
+
 ## Features
 
 - If an interface cannot be opened, this tool will continuously retry to open it
