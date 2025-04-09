@@ -11,12 +11,21 @@ import time
 import datetime
 import pathlib
 import re
-import xmodem
+from functools import partial
 
+# Local dependency to py_linenoise.
+# If this import fails, it might be because the submodule has not been cloned.
+# It can be fixed with:
+# git submodule init --update
 from py_linenoise import linenoise
 
 APP_DATA_DIR = os.path.join(pathlib.Path.home(), ".jterm")
-HISTORY_FILE = os.path.join(APP_DATA_DIR, "history.txt")
+
+EXIT_RESULT_OK = 0
+EXIT_RESULT_ARGUMENT_ERROR = 1
+EXIT_RESULT_INIT_CONNECT_TIMEOUT = 2
+EXIT_RESULT_LATER_CONNECT_TIMEOUT = 3
+EXIT_RESULT_INTERRUPTED = 4
 
 
 class LineBuf:
@@ -51,11 +60,24 @@ class Interface:
     def fileno(self):
         raise NotImplementedError()
 
-    def set_timeout(self, timeout_s):
-        raise NotImplementedError()
-
-    def try_open(self):
-        raise NotImplementedError()
+    def try_open(self, timeout):
+        first_try = True
+        start = time.monotonic()
+        while True:
+            try:
+                self.open()
+                print(f"Connected to '{self}'")
+                return True
+            except OSError as e:
+                if first_try:
+                    print(f"Failed to open '{self}': {e}.")
+                    retry_time = f"for {timeout} s" if timeout else "forever"
+                    print(f"Will retry continuously {retry_time}. Stop with ctrl+c.")
+                    first_try = False
+                if timeout and time.monotonic() >= start + timeout:
+                    print(f"Giving up opening '{self}': {e}")
+                    return False
+            time.sleep(0.1)
 
     def open(self):
         raise NotImplementedError()
@@ -66,120 +88,94 @@ class Interface:
 
 class SerialInterface(Interface):
     def __init__(self, port, baudrate):
+        self._dev = None
         self._port = port
         self._baudrate = baudrate
-        self._timeout_s = 0
+        self._timeout = 0
 
     def read(self, size):
         try:
-            return self.dev.read(size)
+            return self._dev.read(size)
         except serial.SerialException:
             return b""
 
     def write(self, data):
-        self.dev.write(data)
+        self._dev.write(data)
 
     def fileno(self):
-        return self.dev.fileno()
+        return self._dev.fileno()
 
     def open(self):
-        self.dev = serial.Serial(
-            port=self._port, baudrate=self._baudrate, timeout=self._timeout_s
+        self._dev = serial.Serial(
+            port=self._port, baudrate=self._baudrate, timeout=self._timeout
         )
 
     def close(self):
-        self.dev.close()
-        self.dev = None
-
-    def set_timeout(self, timeout_s):
-        self._timeout_s = timeout_s
-        if self.dev is not None:
-            self.dev.timeout = timeout_s
-
-    def try_open(self):
-        first_try = True
-        while True:
-            try:
-                self.open()
-                print(f"Connected to serial port `{self}` at {self._baudrate} bps")
-                break
-            except serial.SerialException as e:
-                if first_try:
-                    print(
-                        f"Failed to open {self}: {e}. Will retry until stopped with ctrl+c."
-                    )
-            first_try = False
-            time.sleep(0.1)
+        if self._dev:
+            self._dev.close()
+            self._dev = None
 
     def __str__(self):
         return f"{self._port}"
 
 
 class SocketInterface(Interface):
-    def __init__(self, host, port, timeout_s):
+    def __init__(self, host, port, timeout):
+        self._dev = None
         self._host = host
         self._port = port
-        self._timeout_s = timeout_s
+        self._timeout = timeout
 
     def read(self, size):
+        if self._dev is None:
+            raise ValueError("Not open")
         try:
-            return self.dev.recv(size)
+            return self._dev.recv(size)
         except BlockingIOError:
             return b""
         except socket.timeout:
             return b""
 
     def write(self, data):
-        self.dev.send(data)
+        if self._dev is None:
+            raise ValueError("Not open")
+        self._dev.send(data)
 
     def fileno(self):
-        return self.dev.fileno()
+        return self._dev.fileno() if self._dev else None
 
     def open(self):
-        self.dev = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.dev.settimeout(self._timeout_s)
-        self.dev.connect((self._host, self._port))
+        self._dev = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._dev.settimeout(self._timeout)
+        self._dev.connect((self._host, self._port))
 
     def close(self):
-        self.dev.close()
-        self.dev = None
-
-    def set_timeout(self, timeout_s):
-        self.timeout_s = timeout_s
-        if self.dev is not None:
-            self.dev.settimeout(timeout_s)
-
-    def try_open(self):
-        first_try = True
-        while True:
-            try:
-                self.open()
-                print(f"Connected to `{self}`")
-                break
-            except (ConnectionRefusedError, TimeoutError) as e:
-                if first_try:
-                    print(
-                        f"Failed to open {self}: {e}. Will retry until stopped with ctrl+c."
-                    )
-            first_try = False
-            time.sleep(1)
+        if self._dev is None:
+            return
+        self._dev.close()
+        self._dev = None
 
     def __str__(self):
         return f"{self._host}:{self._port}"
 
 
-def completion(s):
+def completion(ln, s):
     """return a list of line completions"""
-    if len(s) >= 1 and s[0] == "h":
-        return ("hello", "hello there")
-    return None
+    if not s:
+        return None
+    history = ln.history_list()
+    matches = [h for h in reversed(history) if h.startswith(s)]
+    return matches
 
 
-def hints(s):
+def hints(ln, s):
     """return the hints for this command"""
-    if s == "hello":
-        # string, color, bold
-        return (" World", 35, False)
+    if not s:
+        return None
+    history = ln.history_list()
+    for h in reversed(history):
+        if h.startswith(s):
+            return (h[len(s) :], 35, False)
     return None
 
 
@@ -195,19 +191,18 @@ def eol_option_as_bytestring(eol_option):
 def process_cmd(cmdline, interface, log_file, args):
     if log_file is not None:
         log_file.write(cmdline + "\n")
-
-    if args.delay_between_byte_ms > 0:
+    if args.delay_between_bytes > 0:
         for b in cmdline.encode():
             interface.write(bytes([b]))
-            time.sleep(args.delay_between_byte_ms / 1000)
+            time.sleep(args.delay_between_bytes)
     else:
         interface.write(cmdline.encode())
-    time.sleep(args.delay_before_eol_ms / 1000)
+    time.sleep(args.delay_before_eol)
     eol = eol_option_as_bytestring(args.eol)
     for b in eol.encode():
         interface.write(bytes([b]))
-        time.sleep(args.delay_between_byte_ms / 1000)
-    time.sleep(args.delay_after_eol_ms / 1000)
+        time.sleep(args.delay_between_bytes)
+    time.sleep(args.delay_after_eol)
 
 
 def remove_ansi_escape_codes(s):
@@ -274,12 +269,6 @@ def process_input(ln, line_state, interface, log_file, prompt, args):
         ln.history_add(cmdline)
         process_cmd(cmdline, interface, log_file, args)
         line_state = ln.edit_start(prompt)
-    elif res == linenoise.EditResult.HOTKEY:
-        ln.edit_stop(line_state)
-        cmd = str(line_state)
-        print("Hotkey detected, command line: '%s'" % cmd)
-        interface.write(linenoise._KEY_CTRL_L.encode())
-        line_state = ln.edit_start(prompt, cmd)
     else:
         raise ValueError(res)
     return line_state
@@ -298,34 +287,58 @@ def process_interface(line_state, line_buf, interface, log_file):
     return True
 
 
-def send_file(interface, filename):
-    def getc(size, timeout=1):
-        interface.set_timeout(timeout)
-        return interface.read(size)
+class JtermLineNoise(linenoise.linenoise):
+    def history_next(self, ls):
+        """Show next history item"""
+        base = str(ls)[0 : ls.pos]
+        i = ls.history_idx - 1
+        while i > 0:
+            if self.history_get(i).startswith(base):
+                break
+            i -= 1
+        else:
+            # No matching entry found in history.
+            return
+        if ls.history_idx == 0:
+            # update the current history entry with the line buffer
+            self.history_set(ls.history_idx, str(ls))
+        ls.history_idx = i
+        ls.edit_set(self.history_get(ls.history_idx), ls.pos)
 
-    def putc(data, _timeout=0):
-        interface.write(data)
-
-    with open(filename, "rb") as f:
-        print(f"Sending file '{filename}' to '{interface} using XMODEM protocol")
-        modem = xmodem.XMODEM(getc, putc)
-        modem.send(f, retry=16, timeout=10, quiet=False, callback=None)
+    def history_prev(self, ls):
+        """Show previous history item"""
+        base = str(ls)[0 : ls.pos]
+        i = ls.history_idx + 1
+        while i < len(self.history):
+            if self.history_get(i).startswith(base):
+                break
+            i += 1
+        else:
+            # No matching entry found in history.
+            return
+        # update the current history entry with the line buffer
+        if ls.history_idx == 0:
+            # update the current history entry with the line buffer
+            self.history_set(ls.history_idx, str(ls))
+        ls.history_idx = i
+        ls.edit_set(self.history_get(ls.history_idx), ls.pos)
 
 
 def interactive(interface, log_file, args):
-    ln = linenoise.linenoise()
+    ln = JtermLineNoise()
     line_buf = LineBuf()
 
     # Set the completion callback. This will be called
     # every time the user uses the <tab> key.
-    ln.set_completion_callback(completion)
-    ln.set_hints_callback(hints)
+    ln.set_completion_callback(partial(completion, ln))
+    ln.set_hints_callback(partial(hints, ln))
 
-    # Load history from file. The history file is a plain text file
-    # where entries are separated by newlines.
-    ln.history_load(HISTORY_FILE)
+    # Load history from file.
+    ln.history_set_maxlen(args.history_max)
+    ln.history_load(args.history)
+    print(f"History file: '{args.history}', length: {len(ln.history_list())}")
 
-    ln.set_hotkey(linenoise._KEY_CTRL_L)
+    exit_code = EXIT_RESULT_OK
 
     prompt = "> "
     line_state = ln.edit_start(prompt)
@@ -339,21 +352,31 @@ def interactive(interface, log_file, args):
                     ln, line_state, interface, log_file, prompt, args
                 )
             if interface.fileno() in rd:
-                # Data is available at our interface (or EOF).
+                # Data is available (or EOF) at our interface.
                 got_data = process_interface(line_state, line_buf, interface, log_file)
                 if not got_data:
                     line_state.hide()
-                    print(f"Interface {interface} closed. Will retry to open it.")
+                    print(f"Interface '{interface}' closed. Will retry to open it.")
                     interface.close()
-                    interface.try_open()
+                    if not interface.try_open(args.later_connect_timeout):
+                        print(
+                            "Timeout before successful connect. Increase '--later_connect_timeout' or set it to '0' to retry forever."
+                        )
+                        exit_code = EXIT_RESULT_LATER_CONNECT_TIMEOUT
+                        break
                     line_state.show()
-    except EOFError:
+    except (EOFError, KeyboardInterrupt):
         ln.edit_stop(line_state)
-        os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
-        ln.history_save(HISTORY_FILE)
+        print("EOF or interrupted. Exiting.")
     except:
+        # Unexpected error. Please report it.
         ln.edit_stop(line_state)
+        print("Unexpected error:", sys.exc_info()[0])
         raise
+    print(f"Log available in '{args.log}'")
+    os.makedirs(os.path.dirname(args.history), exist_ok=True)
+    ln.history_save(args.history)
+    return exit_code
 
 
 def split_host_and_port(host_colon_port):
@@ -369,12 +392,12 @@ def parse_args():
     parser.add_argument(
         "--serial",
         metavar="DEVICE",
-        help="The serial device to connect to, for example `/dev/ttyUSB0`",
+        help="The serial device to connect to, for example '/dev/ttyUSB0'",
     )
     parser.add_argument(
         "--socket",
         metavar="HOST:PORT",
-        help="Host and port to connect to, separated by `:`",
+        help="Host and port to connect to, separated by ':'",
     )
     parser.add_argument(
         "--baudrate",
@@ -384,27 +407,30 @@ def parse_args():
     )
     parser.add_argument(
         "--timeout",
-        type=int,
+        type=float,
         default=1,
-        help="Timeout in seconds",
+        help="Timeout (s) when connecting through a socket interface",
     )
     parser.add_argument(
-        "--delay_between_byte_ms",
-        type=int,
+        "--delay_between_bytes",
+        metavar="DELAY",
+        type=float,
         default=0,
-        help="Delay between each byte sent (ms)",
+        help="Delay (s) between each byte sent to an interface",
     )
     parser.add_argument(
-        "--delay_before_eol_ms",
-        type=int,
+        "--delay_before_eol",
+        metavar="DELAY",
+        type=float,
         default=0,
-        help="Delay between command and end of line sequence (ms)",
+        help="Delay (s) after a command has been written and before the end of line sequence is to be written to the interface",
     )
     parser.add_argument(
-        "--delay_after_eol_ms",
-        type=int,
-        default=100,
-        help="Delay after end of last end of line byte (ms)",
+        "--delay_after_eol",
+        metavar="DELAY",
+        type=float,
+        default=0.01,
+        help="Delay (s) after end of line sequence",
     )
     default_log_file_name = (
         datetime.datetime.now().isoformat(sep="_", timespec="seconds").replace(":", "")
@@ -416,14 +442,35 @@ def parse_args():
         default=os.path.join(APP_DATA_DIR, "logs/" + default_log_file_name),
     )
     parser.add_argument(
-        "--sendfile",
-        help="Send a file by using the XMODEM protocol",
+        "--history",
+        help="File to load and save command history to",
+        default=os.path.join(APP_DATA_DIR, "history.txt"),
+    )
+    parser.add_argument(
+        "--history_max",
+        help="Maximum number of commands to keep in history",
+        type=int,
+        default=500,
     )
     parser.add_argument(
         "--eol",
         default="crlf",
         choices=("crlf", "cr", "lf"),
-        help="End of line character(s)",
+        help="End of line sequence for lines written to interface",
+    )
+    parser.add_argument(
+        "--first_connect_timeout",
+        metavar="TIMEOUT",
+        type=float,
+        default=0,
+        help="Time to wait (s) before giving up first connect attempt (0 to retry forever)",
+    )
+    parser.add_argument(
+        "--later_connect_timeout",
+        metavar="TIMEOUT",
+        type=float,
+        default=0,
+        help="Time to wait (s) before giving up later connect attempts (0 to retry forever)",
     )
     return parser.parse_args()
 
@@ -431,8 +478,10 @@ def parse_args():
 def main():
     args = parse_args()
     if args.socket and args.serial:
-        print("Please specify either --socket or --serial, not both.")
-        sys.exit(1)
+        print(
+            "Please specify exactly one interface: '--socket' or '--serial', not both."
+        )
+        sys.exit(EXIT_RESULT_ARGUMENT_ERROR)
     if args.socket:
         try:
             host, port = split_host_and_port(args.socket)
@@ -443,26 +492,37 @@ def main():
                     "or just ':<port>' for localhost."
                 )
             )
-            sys.exit(1)
+            sys.exit(EXIT_RESULT_ARGUMENT_ERROR)
         interface = SocketInterface(host, port, args.timeout)
     elif args.serial:
         interface = SerialInterface(args.serial, args.baudrate)
     else:
-        print("Please specify either --socket or --serial.")
-        sys.exit(1)
+        print(
+            "Please specify an interface to connect through: '--socket' or '--serial'."
+        )
+        print("Example:")
+        prog = sys.argv[0]
+        print(f"  {prog} --socket localhost:1234")
+        print(f"  {prog} --serial /dev/ttyUSB0")
+        sys.exit(EXIT_RESULT_ARGUMENT_ERROR)
 
-    interface.try_open()
-
-    if args.sendfile:
-        send_file(interface, args.sendfile)
-        return
+    try:
+        if not interface.try_open(args.first_connect_timeout):
+            print(
+                "Timeout before first connect. Increase '--first_connect_timeout' or set it to '0' to retry forever."
+            )
+            sys.exit(EXIT_RESULT_INIT_CONNECT_TIMEOUT)
+    except KeyboardInterrupt:
+        print("\nCtrl+c detected. Exiting.")
+        sys.exit(EXIT_RESULT_INTERRUPTED)
 
     log_file = None
     if args.log:
-        print(f"Appending to log file: '{args.log}'")
+        print(f"Log: '{args.log}'")
         os.makedirs(os.path.dirname(args.log), exist_ok=True)
         log_file = open(args.log, "a")
-    interactive(interface, log_file, args)
+    res = interactive(interface, log_file, args)
+    sys.exit(res)
 
 
 if __name__ == "__main__":
