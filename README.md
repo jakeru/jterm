@@ -3,22 +3,23 @@
 This tool is useful when communicating with devices over a serial port or a TCP
 socket.
 
-By using (a slightly modified version) of
-[py_linenoise](https://github.com/deadsy/py_linenoise) it allows the user to
-type commands and receive data at the same time.
+By using (a slightly modified version of)
+[py_linenoise](https://github.com/deadsy/py_linenoise) this tool allows the user
+to type commands and receive data at the same time.
 
 ## Features
 
 - If an interface cannot be opened, this tool will continuously retry to open it
-  until a configurable amount of max time (or forever, which is the default).
+  up until a configurable amount of maximum time (or forever, which is the default).
 - User may type commands while receiving data at the same time.
-- Basic command line editing support (backspace, delete, arrow keys).
+- Basic command line editing support (backspace, arrow keys).
 - Command history is kept between sessions.
 - Type a few letters and press Ctrl+p (or up arrow) to search in history.
 - Data sent and received are always logged with date and time in a new log file
   for each session.
-- Configurable delays when transmitting data to slow devices.
-- Colors are kept on stdout but not included in the log file.
+- Support for slow devices by introducing a configurable delay between each byte
+  sent.
+- ANSI Colors are kept on stdout but not included in the log file.
 
 ## Installation
 
