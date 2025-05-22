@@ -465,7 +465,7 @@ def parse_args():
         "--delay_after_eol",
         metavar="DELAY",
         type=float,
-        default=0.01,
+        default=0,
         help="Delay (s) after end of line sequence",
     )
     default_log_file_name = (
