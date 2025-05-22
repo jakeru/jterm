@@ -11,7 +11,10 @@ import time
 import datetime
 import pathlib
 import re
+import logging
 from functools import partial
+
+logger = logging.getLogger(__name__)
 
 # Local dependency to py_linenoise.
 # If this import fails, it might be because the submodule has not been cloned.
@@ -66,16 +69,18 @@ class Interface:
         while True:
             try:
                 self.open()
-                print(f"Connected to '{self}'")
+                logger.info(f"Connected to: {self}")
                 return True
             except OSError as e:
                 if first_try:
-                    print(f"Failed to open '{self}': {e}.")
+                    logger.warning(f"Failed to open {self}: {e}.")
                     retry_time = f"for {timeout} s" if timeout else "forever"
-                    print(f"Will retry continuously {retry_time}. Stop with ctrl+c.")
+                    logger.info(
+                        f"Will retry continuously {retry_time}. Stop with ctrl+c."
+                    )
                     first_try = False
                 if timeout and time.monotonic() >= start + timeout:
-                    print(f"Giving up opening '{self}': {e}")
+                    logger.warning(f"Giving up opening {self}: {e}")
                     return False
             time.sleep(0.1)
 
@@ -188,20 +193,25 @@ def eol_option_as_bytestring(eol_option):
     return eol_alternatives[eol_option]
 
 
-def process_cmd(cmdline, interface, log_file, args):
-    if log_file is not None:
-        log_file.write(cmdline + "\n")
-    if args.delay_between_bytes > 0:
-        for b in cmdline.encode():
+def write_to_interface(data, interface, delay_between_bytes):
+    if delay_between_bytes > 0:
+        for b in data:
             interface.write(bytes([b]))
-            time.sleep(args.delay_between_bytes)
+            time.sleep(delay_between_bytes)
     else:
-        interface.write(cmdline.encode())
-    time.sleep(args.delay_before_eol)
+        interface.write(data)
+
+
+def process_cmd(cmdline, interface, args):
     eol = eol_option_as_bytestring(args.eol)
-    for b in eol.encode():
-        interface.write(bytes([b]))
-        time.sleep(args.delay_between_bytes)
+    if args.delay_before_eol > 0:
+        write_to_interface(cmdline.encode(), interface, args.delay_between_bytes)
+        time.sleep(args.delay_before_eol)
+        write_to_interface(eol.encode(), interface, args.delay_between_bytes)
+    else:
+        write_to_interface(
+            cmdline.encode() + eol.encode(), interface, args.delay_between_bytes
+        )
     time.sleep(args.delay_after_eol)
 
 
@@ -240,21 +250,46 @@ def replace_non_printable(s, accept=""):
     return "".join(s_out)
 
 
-def print_line(line, log_file):
-    time = datetime.datetime.now().isoformat(timespec="milliseconds")
-    s = line.decode(errors="replace")
-    s = s.replace("\r", "")
+def raw_to_str_without_non_printable_and_ansi(raw):
+    s = raw.decode(errors="replace")
+    s = remove_ansi_escape_codes(s)
+    s = escape_non_printable(s)
+    return s
+
+
+def raw_to_str_without_non_printable(raw):
+    s = raw.decode(errors="replace")
     ESC = "\x1b"
-    s_print = replace_non_printable(s, ESC)
+    s = escape_non_printable(s, ESC)
+    # Reset if needed. Might of course not be correct.
     if ESC in s:
-        s_print = s_print + ESC + "[0m"
-    print(f"{time} {s_print}")
-    if log_file is not None:
-        s_log = replace_non_printable(remove_ansi_escape_codes(s))
-        log_file.write(f"{time} {s_log}\n")
+        s = s + ESC + "[0m"
+    return s
 
 
-def process_input(ln, line_state, interface, log_file, prompt, args):
+class IsoDateFormatter(logging.Formatter):
+    def formatTime(self, record, datefmt=None):
+        if datefmt is None:
+            dt = datetime.datetime.fromtimestamp(
+                record.created, tz=datetime.timezone.utc
+            ).astimezone()
+            return dt.isoformat(timespec="milliseconds")
+        else:
+            return super().formatTime(record, datefmt)
+
+
+class RawMsgFormatter(IsoDateFormatter):
+    def __init__(self, raw_msg_converter, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.raw_msg_converter = raw_msg_converter
+
+    def format(self, record):
+        if hasattr(record, "raw_msg"):
+            record.msg = self.raw_msg_converter(record.raw_msg)
+        return super().format(record)
+
+
+def process_input(ln, line_state, interface, prompt, args):
     res = ln.edit_feed(line_state)
     if res == linenoise.EditResult.MORE:
         pass
@@ -267,14 +302,14 @@ def process_input(ln, line_state, interface, log_file, prompt, args):
         ln.edit_stop(line_state)
         cmdline = str(line_state)
         ln.history_add(cmdline)
-        process_cmd(cmdline, interface, log_file, args)
+        process_cmd(cmdline, interface, args)
         line_state = ln.edit_start(prompt)
     else:
         raise ValueError(res)
     return line_state
 
 
-def process_interface(line_state, line_buf, interface, log_file):
+def process_interface(line_state, line_buf, interface):
     data = interface.read(1024)
     if not data:
         return False
@@ -282,7 +317,7 @@ def process_interface(line_state, line_buf, interface, log_file):
     if line_buf.has_line():
         line_state.hide()
         while (line := line_buf.readline()) is not None:
-            print_line(line, log_file)
+            logger.info("Expecting raw_msg formatter", extra={"raw_msg": line})
         line_state.show()
     return True
 
@@ -324,7 +359,7 @@ class JtermLineNoise(linenoise.linenoise):
         ls.edit_set(self.history_get(ls.history_idx), ls.pos)
 
 
-def interactive(interface, log_file, args):
+def interactive(interface, args):
     ln = JtermLineNoise()
     line_buf = LineBuf()
 
@@ -336,7 +371,7 @@ def interactive(interface, log_file, args):
     # Load history from file.
     ln.history_set_maxlen(args.history_max)
     ln.history_load(args.history)
-    print(f"History file: '{args.history}', length: {len(ln.history_list())}")
+    logger.info(f"History file: {args.history} ({len(ln.history_list())} entries)")
 
     exit_code = EXIT_RESULT_OK
 
@@ -348,18 +383,18 @@ def interactive(interface, log_file, args):
             (rd, _, _) = select.select(fds, (), ())
             if line_state.ifd in rd:
                 # Data is available on stdin (or EOF).
-                line_state = process_input(
-                    ln, line_state, interface, log_file, prompt, args
-                )
+                line_state = process_input(ln, line_state, interface, prompt, args)
             if interface.fileno() in rd:
                 # Data is available (or EOF) at our interface.
-                got_data = process_interface(line_state, line_buf, interface, log_file)
+                got_data = process_interface(line_state, line_buf, interface)
                 if not got_data:
                     line_state.hide()
-                    print(f"Interface '{interface}' closed. Will retry to open it.")
+                    logger.info(
+                        f"Interface '{interface}' closed. Will retry to open it."
+                    )
                     interface.close()
                     if not interface.try_open(args.later_connect_timeout):
-                        print(
+                        logger.info(
                             "Timeout before successful connect. Increase '--later_connect_timeout' or set it to '0' to retry forever."
                         )
                         exit_code = EXIT_RESULT_LATER_CONNECT_TIMEOUT
@@ -367,13 +402,14 @@ def interactive(interface, log_file, args):
                     line_state.show()
     except (EOFError, KeyboardInterrupt):
         ln.edit_stop(line_state)
-        print("EOF or interrupted. Exiting.")
+        logger.info("EOF or interrupted. Exiting.")
     except:
         # Unexpected error. Please report it.
         ln.edit_stop(line_state)
-        print("Unexpected error:", sys.exc_info()[0])
+        logger.error("Unexpected error:", sys.exc_info()[0])
         raise
-    print(f"Log available in '{args.log}'")
+    if args.log:
+        print(f"Log available in: {args.log}")
     os.makedirs(os.path.dirname(args.history), exist_ok=True)
     ln.history_save(args.history)
     return exit_code
@@ -506,22 +542,46 @@ def main():
         print(f"  {prog} --serial /dev/ttyUSB0")
         sys.exit(EXIT_RESULT_ARGUMENT_ERROR)
 
+    logger.setLevel(logging.INFO)
+
+    console_log_handler = logging.StreamHandler()
+    console_log_fmt = "%(asctime)s.%(msecs)03d %(message)s"
+    console_log_datefmt = "%H:%M:%S"
+    console_log_handler.setFormatter(
+        RawMsgFormatter(
+            raw_to_str_without_non_printable,
+            fmt=console_log_fmt,
+            datefmt=console_log_datefmt,
+        )
+    )
+
+    logger.addHandler(console_log_handler)
+
+    if args.log:
+        print(f"Logging to: {args.log}")
+        os.makedirs(os.path.dirname(os.path.abspath(args.log)), exist_ok=True)
+        file_log_handler = logging.FileHandler(args.log)
+        file_log_fmt = "%(asctime)s %(message)s"
+        file_log_formatter = RawMsgFormatter(
+            raw_to_str_without_non_printable_and_ansi, fmt=file_log_fmt
+        )
+        file_log_handler.setFormatter(file_log_formatter)
+        logger.addHandler(file_log_handler)
+
     try:
         if not interface.try_open(args.first_connect_timeout):
-            print(
-                "Timeout before first connect. Increase '--first_connect_timeout' or set it to '0' to retry forever."
+            logger.warning(
+                (
+                    "Timeout before first connect. "
+                    "Increase '--first_connect_timeout' or set it to '0' to retry forever."
+                )
             )
             sys.exit(EXIT_RESULT_INIT_CONNECT_TIMEOUT)
     except KeyboardInterrupt:
-        print("\nCtrl+c detected. Exiting.")
+        logger.info("Interrupted. Exiting.")
         sys.exit(EXIT_RESULT_INTERRUPTED)
 
-    log_file = None
-    if args.log:
-        print(f"Log: '{args.log}'")
-        os.makedirs(os.path.dirname(args.log), exist_ok=True)
-        log_file = open(args.log, "a")
-    res = interactive(interface, log_file, args)
+    res = interactive(interface, args)
     sys.exit(res)
 
 
