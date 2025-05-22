@@ -35,7 +35,17 @@ Like this:
 git clone https://github.com/jakeru/jterm.git --recursive ~/jterm
 ```
 
-## Install dependencies
+If you get an error that says that module `pylinenoise` cannot be found, it is
+very likely that the repository was not cloned with submodules included.
+
+In order to fetch the submodules, go to the destination path and execute the
+following:
+
+``` sh
+git update --init
+```
+
+## Install other dependencies
 
 This application requires [pyserial](https://pypi.org/project/pyserial/).
 
