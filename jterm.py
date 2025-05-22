@@ -32,9 +32,9 @@ EXIT_RESULT_INTERRUPTED = 4
 
 
 class LineBuf:
-    def __init__(self):
+    def __init__(self, eol):
         self.buf = io.BytesIO()
-        self.eol = b"\n"
+        self.eol = eol
 
     def write(self, data):
         self.buf.write(data)
@@ -361,10 +361,6 @@ class JtermLineNoise(linenoise.linenoise):
 
 def interactive(interface, args):
     ln = JtermLineNoise()
-    line_buf = LineBuf()
-
-    # Set the completion callback. This will be called
-    # every time the user uses the <tab> key.
     ln.set_completion_callback(partial(completion, ln))
     ln.set_hints_callback(partial(hints, ln))
 
@@ -377,6 +373,7 @@ def interactive(interface, args):
 
     prompt = "> "
     line_state = ln.edit_start(prompt)
+    line_buf = LineBuf(eol_option_as_bytestring(args.eol).encode())
     try:
         while True:
             fds = (line_state.ifd, interface.fileno())
