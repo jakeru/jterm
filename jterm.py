@@ -236,11 +236,14 @@ def remove_ansi_escape_codes(s):
     return ansi_escape.sub("", s)
 
 
-def replace_non_printable(s, accept=""):
+def escape_non_printable(s, accept=""):
     s_out = []
+    convert = {"\n": "\\n", "\r": "\\r"}
     for c in s:
         if c in accept:
             s_out.append(c)
+        elif c in convert:
+            s_out.append(convert[c])
         elif c == "\\":
             s_out.append("\\\\")
         elif c.isprintable():
