@@ -24,6 +24,15 @@ published version 1.0.0 of this tool.
   sent.
 - ANSI Colors are kept on stdout but not included in the log file.
 
+## Future improvements
+
+- Configuration files
+- Profile support to separate history files and configuration
+- Wait for prompt before sending next command
+- Navigation using ctrl+arrow to jump between words.
+- Word completion
+- Multiline prompt
+
 ## Installation
 
 Clone this repository and include the submodule (by specifying `--recursive`).
