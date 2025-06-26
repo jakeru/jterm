@@ -30,6 +30,7 @@ published version 1.0.0 of this tool.
 - Profile support to separate history files and configuration
 - Wait for prompt before sending next command
 - Navigation using ctrl+arrow to jump between words.
+  :heavy_check_mark: Added in June 2025.
 - Word completion
 - Multiline prompt
 
