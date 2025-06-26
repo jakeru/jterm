@@ -373,12 +373,16 @@ def interactive(interface, args):
     ln.set_multiline(multiline)
 
     # Load history from file.
-    ln.history_set_maxlen(args.history_max)
-    ln.history_load(args.history)
-    entry_or_entries = "entry" if len(ln.history_list()) == 1 else "entries"
-    logger.info(
-        f"History file: {args.history} ({len(ln.history_list())} {entry_or_entries})"
+    history_file = (
+        args.history.replace("${profile}", args.profile) if args.history else None
     )
+    ln.history_set_maxlen(args.history_max)
+    if history_file:
+        ln.history_load(history_file)
+        entry_or_entries = "entry" if len(ln.history_list()) == 1 else "entries"
+        logger.info(
+            f"History file: {history_file} ({len(ln.history_list())} {entry_or_entries})"
+        )
 
     exit_code = EXIT_RESULT_OK
 
@@ -416,9 +420,7 @@ def interactive(interface, args):
         ln.edit_stop(line_state)
         logger.error("Unexpected error:", sys.exc_info()[0])
         raise
-    if args.log:
-        print(f"Log available in: {args.log}")
-    if args.history and len(ln.history_list()) > 0:
+    if history_file and len(ln.history_list()) > 0:
         os.makedirs(os.path.dirname(args.history), exist_ok=True)
         ln.history_save(args.history)
     return exit_code
@@ -477,6 +479,12 @@ def parse_args():
         default=0,
         help="Delay (s) after end of line sequence",
     )
+    parser.add_argument(
+        "-p",
+        "--profile",
+        help="Name of the profile to use",
+        default="default",
+    )
     default_log_file_name = (
         datetime.datetime.now().isoformat(sep="_", timespec="seconds").replace(":", "")
         + ".log"
@@ -484,12 +492,12 @@ def parse_args():
     parser.add_argument(
         "--log",
         help="Log file to append to",
-        default=os.path.join(APP_DATA_DIR, "logs/" + default_log_file_name),
+        default=os.path.join(APP_DATA_DIR, "logs", "${profile}", default_log_file_name),
     )
     parser.add_argument(
         "--history",
         help="File to load and save command history to",
-        default=os.path.join(APP_DATA_DIR, "history.txt"),
+        default=os.path.join(APP_DATA_DIR, "history", "${profile}.txt"),
     )
     parser.add_argument(
         "--history_max",
@@ -551,6 +559,14 @@ def main():
         print(f"  {prog} --serial /dev/ttyUSB0")
         sys.exit(EXIT_RESULT_ARGUMENT_ERROR)
 
+    if not re.fullmatch(r"[\w\-]+", args.profile, flags=re.UNICODE):
+        print(f"The supplied profile name '{args.profile}' is not valid.")
+        print(
+            "A valid profile name consists only of letters, digits and "
+            "characters such as: '_', '-'."
+        )
+        sys.exit(EXIT_RESULT_ARGUMENT_ERROR)
+
     logger.setLevel(logging.INFO)
 
     console_log_handler = logging.StreamHandler()
@@ -566,10 +582,11 @@ def main():
 
     logger.addHandler(console_log_handler)
 
-    if args.log:
-        logger.info(f"Logging to: {args.log}")
-        os.makedirs(os.path.dirname(os.path.abspath(args.log)), exist_ok=True)
-        file_log_handler = logging.FileHandler(args.log)
+    log_file = args.log.replace("${profile}", args.profile) if args.log else None
+    if log_file:
+        logger.info(f"Logging to: {log_file}")
+        os.makedirs(os.path.dirname(os.path.abspath(log_file)), exist_ok=True)
+        file_log_handler = logging.FileHandler(log_file)
         file_log_fmt = "%(asctime)s %(message)s"
         file_log_formatter = RawMsgFormatter(
             raw_to_str_without_non_printable_and_ansi, fmt=file_log_fmt
@@ -591,6 +608,8 @@ def main():
         sys.exit(EXIT_RESULT_INTERRUPTED)
 
     res = interactive(interface, args)
+    if log_file:
+        print(f"Log available in: {log_file}")
     sys.exit(res)
 
 
