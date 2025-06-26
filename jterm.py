@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # Local dependency to py_linenoise.
 # If this import fails, it might be because the submodule has not been cloned.
 # It can be fixed with:
-# git submodule init --update
+# git submodule update --init
 from py_linenoise import linenoise
 
 APP_DATA_DIR = os.path.join(pathlib.Path.home(), ".jterm")
