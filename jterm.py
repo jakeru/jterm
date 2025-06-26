@@ -14,13 +14,14 @@ import re
 import logging
 from functools import partial
 
-logger = logging.getLogger(__name__)
 
 # Local dependency to py_linenoise.
 # If this import fails, it might be because the submodule has not been cloned.
 # It can be fixed with:
 # git submodule update --init
 from py_linenoise import linenoise
+
+logger = logging.getLogger()
 
 APP_DATA_DIR = os.path.join(pathlib.Path.home(), ".jterm")
 
@@ -374,7 +375,10 @@ def interactive(interface, args):
     # Load history from file.
     ln.history_set_maxlen(args.history_max)
     ln.history_load(args.history)
-    logger.info(f"History file: {args.history} ({len(ln.history_list())} entries)")
+    entry_or_entries = "entry" if len(ln.history_list()) == 1 else "entries"
+    logger.info(
+        f"History file: {args.history} ({len(ln.history_list())} {entry_or_entries})"
+    )
 
     exit_code = EXIT_RESULT_OK
 
@@ -563,7 +567,7 @@ def main():
     logger.addHandler(console_log_handler)
 
     if args.log:
-        print(f"Logging to: {args.log}")
+        logger.info(f"Logging to: {args.log}")
         os.makedirs(os.path.dirname(os.path.abspath(args.log)), exist_ok=True)
         file_log_handler = logging.FileHandler(args.log)
         file_log_fmt = "%(asctime)s %(message)s"
