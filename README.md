@@ -33,6 +33,7 @@ published version 1.0.0 of this tool.
   :heavy_check_mark: Added in June 2025.
 - Word completion
 - Multiline prompt
+  :heavy_check_mark: Added in June 2025.
 
 ## Installation
 

@@ -365,7 +365,11 @@ class JtermLineNoise(linenoise.linenoise):
 def interactive(interface, args):
     ln = JtermLineNoise()
     ln.set_completion_callback(partial(completion, ln))
-    ln.set_hints_callback(partial(hints, ln))
+    multiline = True
+    if not multiline:
+        # Hints only work properly for single line command lines.
+        ln.set_hints_callback(partial(hints, ln))
+    ln.set_multiline(multiline)
 
     # Load history from file.
     ln.history_set_maxlen(args.history_max)
