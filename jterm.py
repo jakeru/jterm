@@ -410,8 +410,9 @@ def interactive(interface, args):
         raise
     if args.log:
         print(f"Log available in: {args.log}")
-    os.makedirs(os.path.dirname(args.history), exist_ok=True)
-    ln.history_save(args.history)
+    if args.history and len(ln.history_list()) > 0:
+        os.makedirs(os.path.dirname(args.history), exist_ok=True)
+        ln.history_save(args.history)
     return exit_code
 
 
