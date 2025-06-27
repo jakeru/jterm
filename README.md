@@ -26,15 +26,15 @@ published version 1.0.0 of this tool.
 
 ## Future improvements
 
-- Configuration files
-- Profile support to separate history files and configuration
-  :heavy_check_mark: Added in June 2025.
-- Wait for prompt before sending next command
-- Navigation using ctrl+arrow to jump between words.
-  :heavy_check_mark: Added in June 2025.
-- Word completion
-- Multiline prompt
-  :heavy_check_mark: Added in June 2025.
+- ✓ DONE: Profile support to separate history files and logs.
+  Added in June 2025.
+- ✓ DONE: Navigation using ctrl+arrow to jump between words.
+  Added in June 2025.
+- ✓ DONE: Multiline prompt.
+  Added in June 2025.
+- Configuration files.
+- Wait for prompt before sending next command.
+- Word completion.
 
 ## Installation
 
